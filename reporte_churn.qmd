@@ -1,0 +1,212 @@
+---
+title: "Análisis de Abandono de Clientes (Churn) — Telecomunicaciones California"
+author: "Mauricio Alessandrello"
+date: today
+lang: es
+format:
+  html:
+    toc: true
+    toc-title: "Contenido"
+    number-sections: true
+    theme: flatly
+    code-fold: true
+    code-summary: "Mostrar código"
+    df-print: paged
+    embed-resources: true
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(scales)
+library(knitr)
+
+datos <- read_excel("data.xlsx") %>% clean_names()
+
+datos <- datos %>%
+  select(-count, -country, -state) %>%
+  mutate(total_charges = na_if(str_trim(total_charges), "") %>% as.numeric())
+
+num_vars <- c("tenure_months", "monthly_charges", "total_charges", "cltv", "churn_score")
+
+cat_vars <- c("gender", "senior_citizen", "partner", "dependents", "phone_service",
+              "multiple_lines", "internet_service", "online_security", "online_backup",
+              "device_protection", "tech_support", "streaming_tv", "streaming_movies",
+              "contract", "paperless_billing", "payment_method")
+```
+
+# Introducción
+
+## El problema
+
+El abandono de clientes (*churn*) es uno de los principales riesgos para la rentabilidad de una empresa de telecomunicaciones: retener a un cliente existente es, en general, mucho más económico que adquirir uno nuevo. Comprender **quién abandona el servicio, con qué frecuencia y por qué** permite a la compañía priorizar acciones de retención sobre los segmentos de clientes de mayor riesgo, en lugar de aplicar esfuerzos genéricos sobre toda la base.
+
+El objetivo de este reporte es realizar un análisis exploratorio de datos (EDA) sobre una base de clientes de una empresa de telecomunicaciones de California, con el fin de:
+
+- Cuantificar la magnitud del abandono (tasa de churn general).
+- Identificar qué variables contractuales, de servicio y demográficas están asociadas con una mayor probabilidad de abandono.
+- Relevar los motivos declarados por los clientes que efectivamente se dieron de baja.
+- Dejar sentadas las bases (variables relevantes, problemas de calidad de datos) para un eventual modelo predictivo de churn.
+
+## El set de datos
+
+El archivo `data.xlsx` contiene información de **`r format(nrow(datos), big.mark = ".", decimal.mark = ",")` clientes** de una compañía de telecomunicaciones que opera en el estado de California, Estados Unidos. Es la base pública conocida como *IBM Telco Customer Churn*.
+
+Cada fila representa un cliente y cada columna un atributo del mismo. Las variables se agrupan en:
+
+- **Identificación y ubicación:** ID de cliente, ciudad, código postal, latitud/longitud (las columnas `count`, `country` y `state` son constantes para toda la base y se descartaron por no aportar información).
+- **Perfil demográfico:** género, si es adulto mayor (`senior_citizen`), si tiene pareja (`partner`) o personas a cargo (`dependents`).
+- **Servicios contratados:** teléfono, líneas múltiples, tipo de internet, seguridad online, respaldo online, protección de dispositivo, soporte técnico, streaming de TV y de películas.
+- **Condiciones comerciales:** tipo de contrato, facturación sin papel, método de pago, cargo mensual y cargo total acumulado.
+- **Variables de resultado (churn):** si el cliente abandonó (`churn_label` / `churn_value`), un puntaje de propensión al abandono (`churn_score`), el valor de vida del cliente (`cltv`) y, para quienes abandonaron, el motivo declarado (`churn_reason`).
+
+Antes de calcular cualquier porcentaje se realizó una limpieza mínima: se descartaron las columnas constantes, y se convirtió `total_charges` a valor numérico. Esto reveló `r sum(is.na(datos$total_charges))` filas con `total_charges` faltante, correspondientes en todos los casos a clientes nuevos con antigüedad (`tenure_months`) igual a cero, es decir, clientes que todavía no recibieron su primera facturación. No se trata de un error de carga sino de una situación esperable del negocio.
+
+# Cálculos de porcentajes
+
+*(El código que genera cada tabla y gráfico está oculto por defecto; puede desplegarse con el botón "Mostrar código" en cada sección.)*
+
+## Tasa general de abandono
+
+```{r}
+#| label: tasa-churn
+
+datos %>%
+  tabyl(churn_label) %>%
+  adorn_pct_formatting(digits = 1) %>%
+  rename(`Estado del cliente` = churn_label,
+         `Cantidad` = n,
+         `Porcentaje` = percent) %>%
+  kable(align = "lcc")
+```
+
+Aproximadamente **1 de cada 4 clientes** (26,5%) abandonó el servicio. Es una proporción considerable, que además está moderadamente desbalanceada: hay casi el triple de clientes que permanecen respecto de los que se van.
+
+## Tasa de abandono por tipo de contrato
+
+```{r}
+#| label: churn-contrato
+
+datos %>%
+  group_by(contract) %>%
+  summarise(clientes = n(), tasa_churn = mean(churn_value), .groups = "drop") %>%
+  arrange(desc(tasa_churn)) %>%
+  mutate(tasa_churn = percent(tasa_churn, accuracy = 0.1)) %>%
+  rename(`Tipo de contrato` = contract, `Clientes` = clientes, `Tasa de churn` = tasa_churn) %>%
+  kable(align = "lcc")
+```
+
+El tipo de contrato es, de lejos, la variable con mayor impacto: los contratos **mes a mes** abandonan a una tasa de **42,7%**, mientras que los contratos a **un año** caen a **11,3%** y los de **dos años** a apenas **2,8%**.
+
+## Tasa de abandono por servicios de internet y soporte
+
+```{r}
+#| label: churn-internet-soporte
+
+vars_soporte <- c("internet_service", "online_security", "tech_support",
+                   "online_backup", "device_protection")
+
+datos %>%
+  select(all_of(vars_soporte), churn_value) %>%
+  pivot_longer(-churn_value, names_to = "variable", values_to = "nivel") %>%
+  group_by(variable, nivel) %>%
+  summarise(clientes = n(), tasa_churn = mean(churn_value), .groups = "drop") %>%
+  arrange(variable, desc(tasa_churn)) %>%
+  mutate(tasa_churn = percent(tasa_churn, accuracy = 0.1)) %>%
+  rename(Variable = variable, Nivel = nivel, Clientes = clientes, `Tasa de churn` = tasa_churn) %>%
+  kable(align = "llcc")
+```
+
+Los clientes que **no** cuentan con seguridad online, soporte técnico, respaldo online o protección de dispositivo abandonan a tasas de entre **39% y 42%**, muy por encima de quienes sí tienen esos servicios adicionales (15%–23%). Asimismo, el internet por **fibra óptica** tiene una tasa de churn de **41,9%**, frente a **19,0%** en DSL y **7,4%** entre quienes no tienen internet contratado.
+
+## Tasa de abandono por método de pago
+
+```{r}
+#| label: churn-pago
+
+datos %>%
+  group_by(payment_method) %>%
+  summarise(clientes = n(), tasa_churn = mean(churn_value), .groups = "drop") %>%
+  arrange(desc(tasa_churn)) %>%
+  mutate(tasa_churn = percent(tasa_churn, accuracy = 0.1)) %>%
+  rename(`Método de pago` = payment_method, `Clientes` = clientes, `Tasa de churn` = tasa_churn) %>%
+  kable(align = "lcc")
+```
+
+El pago mediante **cheque electrónico** presenta una tasa de churn de **45,3%**, casi el triple que el resto de los métodos de pago (débito/tarjeta automáticos y cheque por correo, todos entre 15% y 19%).
+
+## Tasa de abandono por perfil demográfico
+
+```{r}
+#| label: churn-demografico
+
+vars_demo <- c("senior_citizen", "partner", "dependents", "gender")
+
+datos %>%
+  select(all_of(vars_demo), churn_value) %>%
+  pivot_longer(-churn_value, names_to = "variable", values_to = "nivel") %>%
+  group_by(variable, nivel) %>%
+  summarise(clientes = n(), tasa_churn = mean(churn_value), .groups = "drop") %>%
+  arrange(variable, desc(tasa_churn)) %>%
+  mutate(tasa_churn = percent(tasa_churn, accuracy = 0.1)) %>%
+  rename(Variable = variable, Nivel = nivel, Clientes = clientes, `Tasa de churn` = tasa_churn) %>%
+  kable(align = "llcc")
+```
+
+Los clientes adultos mayores abandonan más (**41,7%** vs. **23,6%**), al igual que quienes no tienen pareja o personas a cargo. El **género no muestra diferencias relevantes** (26,9% mujeres vs. 26,2% hombres).
+
+## Motivos de abandono declarados
+
+```{r}
+#| label: motivos-churn
+
+datos %>%
+  filter(churn_label == "Yes", !is.na(churn_reason)) %>%
+  count(churn_reason, sort = TRUE) %>%
+  mutate(porcentaje = percent(n / sum(n), accuracy = 0.1)) %>%
+  rename(`Motivo declarado` = churn_reason, `Clientes` = n, `Porcentaje sobre bajas` = porcentaje) %>%
+  kable(align = "lcc")
+```
+
+Entre quienes efectivamente se dieron de baja, los motivos más citados están vinculados a la **competencia** (mejor velocidad de descarga, más datos, mejor oferta, mejores dispositivos) y a la **atención/actitud del personal de soporte y servicio**, seguidos por problemas de red, producto y precio.
+
+# Conclusiones
+
+A partir del análisis exploratorio se pueden extraer las siguientes conclusiones:
+
+1. **La tasa de abandono es significativa y algo desbalanceada.** El 26,5% de los clientes abandonó el servicio, frente a un 73,5% que permanece. Es una proporción alta para el negocio y, de cara a un futuro modelo predictivo, requiere técnicas de manejo de desbalance (muestreo estratificado, métricas como F1 o AUC en lugar de solo *accuracy*).
+
+2. **La calidad de los datos es en general buena**, con dos particularidades esperables y no problemáticas: los 11 valores faltantes en `total_charges` corresponden a clientes nuevos sin facturación aún (antigüedad = 0), y los valores faltantes en `churn_reason` corresponden exactamente a los clientes que no abandonaron (no se les pregunta el motivo).
+
+3. **Existe colinealidad severa entre variables numéricas de facturación.** `total_charges` es prácticamente igual al producto de `tenure_months` por `monthly_charges` (correlación ≈ 0,9996), y correlaciona 0,83 con la antigüedad. Para cualquier modelo posterior conviene conservar una sola de estas variables o construir una razón/derivada, para evitar redundancia.
+
+4. **El tipo de contrato es el factor individual más determinante del abandono.** La tasa de churn cae drásticamente a medida que aumenta el compromiso contractual: 42,7% en contratos mes a mes, 11,3% en contratos anuales y solo 2,8% en contratos de dos años. Es la palanca de retención más clara y accionable.
+
+5. **La ausencia de servicios de valor agregado (seguridad, soporte técnico, respaldo, protección de dispositivo) está fuertemente asociada a mayor abandono**, con tasas de 39%–42% frente a 15%–23% entre quienes sí los contratan. Esto sugiere que estos servicios actúan como "anclas" de retención, más allá de su función original.
+
+6. **El internet por fibra óptica y el pago por cheque electrónico son señales de alerta.** Los clientes con fibra óptica (41,9%) y quienes pagan con cheque electrónico (45,3%) muestran tasas de abandono muy superiores al resto, lo que amerita revisar la relación precio/calidad percibida en fibra y la fricción o falta de automatización asociada al cheque electrónico como medio de pago.
+
+7. **Los clientes que abandonan lo hacen tempranamente y no son necesariamente los de menor valor.** La antigüedad mediana de quienes abandonan es de apenas 10 meses (vs. 38 de quienes permanecen), y pagan mensualmente más (mediana \$79,65 vs. \$64,43), aunque su CLTV es solo levemente inferior (4.238 vs. 4.620). El churn está erosionando ingresos genuinos, no solo "descartando" clientes marginales.
+
+8. **Los motivos declarados de baja confirman el diagnóstico estructural**: predominan las razones vinculadas a ofertas de la competencia y a la atención/actitud del personal, coherente con el perfil de riesgo identificado (contratos cortos, sin servicios adicionales, fibra óptica, pago por cheque electrónico).
+
+9. **El género y la disponibilidad de servicio telefónico no son factores relevantes** de churn en esta base, por lo que no deberían priorizarse en estrategias de segmentación para retención.
+
+## Recomendación general
+
+El segmento de mayor riesgo combina: **contrato mes a mes, sin servicios de seguridad/soporte contratados, con internet por fibra óptica y que paga mediante cheque electrónico**. Concentrar acciones de retención (migración a contratos más largos, bonificación de servicios adicionales, mejora en la atención de soporte) sobre este segmento específico debería tener el mayor impacto por unidad de esfuerzo invertido.
+
+## Recursos relacionados
+
+Este reporte es exploratorio (EDA). El análisis continúa en otros dos documentos, disponibles en la misma carpeta del proyecto:
+
+- [**Dashboard de Churn**](dashboard_churn.html) — visualización interactiva de estas mismas métricas, más una página de riesgo de churn por cliente.
+- [**Reporte del Modelo Predictivo**](reporte_modelo.html) — el modelo de clasificación entrenado a partir de estos hallazgos, sus métricas y la justificación del umbral de decisión usado.

@@ -1,0 +1,439 @@
+---
+title: "Dashboard de Churn — Telecomunicaciones California"
+format:
+  dashboard:
+    theme: flatly
+    nav-buttons: []
+    embed-resources: true
+lang: es
+execute:
+  echo: false
+  warning: false
+  message: false
+---
+
+```{=html}
+<style>
+p.value-box-value {
+  font-size: 1.4rem !important;
+  white-space: nowrap;
+}
+</style>
+```
+
+```{r}
+#| label: setup
+#| include: false
+
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(scales)
+library(plotly)
+library(DT)
+library(caret)
+library(pROC)
+
+datos <- read_excel("data.xlsx") %>%
+  clean_names() %>%
+  select(-count, -country, -state) %>%
+  mutate(total_charges = na_if(str_trim(total_charges), "") %>% as.numeric())
+
+# --- paleta (dataviz skill: referencia validada) ---
+col_blue     <- "#2a78d6"
+col_good     <- "#0ca30c"
+col_critical <- "#d03b3b"
+col_ink      <- "#0b0b0b"
+col_ink2     <- "#52514e"
+col_muted    <- "#898781"
+col_grid     <- "#e1e0d9"
+col_surface  <- "#fcfcfb"
+
+theme_dash <- function() {
+  theme_minimal(base_size = 12) +
+    theme(
+      panel.grid.major.y = element_blank(),
+      panel.grid.major.x = element_line(color = col_grid, linewidth = 0.3),
+      panel.grid.minor   = element_blank(),
+      axis.text          = element_text(color = col_ink2),
+      axis.title         = element_blank(),
+      plot.title         = element_blank(),
+      legend.title        = element_blank(),
+      strip.text         = element_text(color = col_ink, face = "bold", size = 10, hjust = 0),
+      plot.background    = element_rect(fill = col_surface, color = NA),
+      panel.background   = element_rect(fill = col_surface, color = NA)
+    )
+}
+
+# barra horizontal de tasa de churn por nivel de UNA variable categorica
+bar_churn <- function(var, accuracy = 0.1) {
+  d <- datos %>%
+    group_by(nivel = .data[[var]]) %>%
+    summarise(clientes = n(), tasa = mean(churn_value), .groups = "drop") %>%
+    mutate(nivel = fct_reorder(nivel, tasa))
+
+  ggplot(d, aes(x = tasa, y = nivel)) +
+    geom_col(fill = col_blue, width = 0.62) +
+    geom_text(aes(label = percent(tasa, accuracy = accuracy)),
+              hjust = -0.15, size = 3.3, color = col_ink) +
+    scale_x_continuous(labels = percent, expand = expansion(mult = c(0, 0.20))) +
+    theme_dash()
+}
+
+# grilla de barras (facet) de tasa de churn por variable, para varias variables a la vez
+facet_bar_churn <- function(vars, etiquetas, ncol = 2, accuracy = 0.1) {
+  d <- datos %>%
+    select(all_of(vars), churn_value) %>%
+    pivot_longer(-churn_value, names_to = "variable", values_to = "nivel") %>%
+    group_by(variable, nivel) %>%
+    summarise(clientes = n(), tasa = mean(churn_value), .groups = "drop") %>%
+    mutate(
+      variable_lbl = recode(variable, !!!etiquetas),
+      clave = fct_reorder(paste(variable, nivel, sep = "___"), tasa)
+    )
+
+  ggplot(d, aes(x = tasa, y = clave)) +
+    geom_col(fill = col_blue, width = 0.62) +
+    geom_text(aes(label = percent(tasa, accuracy = accuracy)),
+              hjust = -0.15, size = 3, color = col_ink) +
+    scale_y_discrete(labels = function(x) sub("^.*___", "", x)) +
+    scale_x_continuous(labels = percent, expand = expansion(mult = c(0, 0.28))) +
+    facet_wrap(~variable_lbl, scales = "free_y", ncol = ncol) +
+    theme_dash()
+}
+
+n_total     <- nrow(datos)
+tasa_churn  <- mean(datos$churn_value)
+tenure_prom <- mean(datos$tenure_months)
+cltv_prom   <- mean(datos$cltv)
+
+# --- modelo predictivo (mismo pipeline que Modelo.R / reporte_modelo.qmd) ---
+set.seed(2026)
+
+model_data <- datos %>%
+  select(
+    customer_id, churn_label,
+    gender, senior_citizen, partner, dependents,
+    tenure_months, phone_service, multiple_lines, internet_service,
+    online_security, online_backup, device_protection, tech_support,
+    streaming_tv, streaming_movies, contract, paperless_billing,
+    payment_method, monthly_charges
+  ) %>%
+  mutate(
+    churn_label = factor(churn_label, levels = c("No", "Yes")),
+    across(where(is.character) & !customer_id, as.factor)
+  )
+
+idx_train  <- createDataPartition(model_data$churn_label, p = 0.75, list = FALSE)
+train_data <- model_data[idx_train, ] %>% select(-customer_id)
+test_data  <- model_data[-idx_train, ] %>% select(-customer_id)
+
+ctrl <- trainControl(method = "cv", number = 5, classProbs = TRUE,
+                      summaryFunction = twoClassSummary, savePredictions = "final")
+
+modelo_glm <- train(churn_label ~ ., data = train_data, method = "glm",
+                     family = "binomial", trControl = ctrl, metric = "ROC")
+
+prob_test <- predict(modelo_glm, test_data, type = "prob")[, "Yes"]
+roc_glm   <- roc(test_data$churn_label, prob_test, levels = c("No", "Yes"), direction = "<")
+umbral    <- as.numeric(coords(roc_glm, "best", best.method = "youden", ret = "threshold")$threshold)
+
+pred_umbral <- factor(ifelse(prob_test > umbral, "Yes", "No"), levels = c("No", "Yes"))
+cm_umbral   <- confusionMatrix(pred_umbral, test_data$churn_label, positive = "Yes")
+
+# probabilidad de churn para TODA la base (para el tablero de riesgo por cliente)
+model_data$prob_churn <- predict(modelo_glm, model_data %>% select(-customer_id), type = "prob")[, "Yes"]
+
+tabla_riesgo <- model_data %>%
+  filter(churn_label == "No") %>%
+  transmute(
+    `ID cliente`     = customer_id,
+    Contrato         = contract,
+    Internet         = internet_service,
+    `Método de pago` = payment_method,
+    `Antigüedad (m)` = tenure_months,
+    `Cargo mensual`  = dollar(monthly_charges),
+    `Prob. de churn` = percent(prob_churn, accuracy = 0.1),
+    Riesgo           = if_else(prob_churn > umbral, "Alto riesgo", "Bajo riesgo"),
+    .prob            = prob_churn
+  ) %>%
+  arrange(desc(.prob)) %>%
+  select(-.prob)
+```
+
+# Resumen
+
+## Row {height=22%}
+
+```{r}
+#| content: valuebox
+#| title: "Total de clientes"
+#| icon: people-fill
+#| color: primary
+list(value = format(n_total, big.mark = "."))
+```
+
+```{r}
+#| content: valuebox
+#| title: "Tasa de churn"
+#| icon: graph-down-arrow
+#| color: danger
+list(value = percent(tasa_churn, accuracy = 0.1))
+```
+
+```{r}
+#| content: valuebox
+#| title: "Antigüedad promedio"
+#| icon: calendar3
+#| color: info
+list(value = paste0(round(tenure_prom, 1), " meses"))
+```
+
+```{r}
+#| content: valuebox
+#| title: "CLTV promedio"
+#| icon: cash-stack
+#| color: success
+list(value = dollar(cltv_prom, accuracy = 1, big.mark = "."))
+```
+
+## Row {height=78%}
+
+```{r}
+#| title: "Clientes por estado (activo vs. dado de baja)"
+#| fig-width: 5
+#| fig-height: 4.2
+
+d <- datos %>%
+  count(churn_label) %>%
+  mutate(
+    churn_label = recode(churn_label, "No" = "Activo", "Yes" = "Dado de baja"),
+    churn_label = fct_reorder(churn_label, n),
+    pct = percent(n / sum(n), accuracy = 0.1)
+  )
+
+ggplot(d, aes(x = n, y = churn_label, fill = churn_label)) +
+  geom_col(width = 0.55) +
+  geom_text(aes(label = paste0(comma(n), " (", pct, ")")),
+            hjust = -0.1, size = 3.6, color = col_ink) +
+  scale_fill_manual(values = c("Activo" = col_good, "Dado de baja" = col_critical)) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.35))) +
+  theme_dash() +
+  theme(legend.position = "none")
+```
+
+```{r}
+#| title: "Antigüedad y cargo mensual según estado del cliente"
+#| fig-width: 7
+#| fig-height: 4.2
+
+datos %>%
+  mutate(churn_label = recode(churn_label, "No" = "Activo", "Yes" = "Dado de baja")) %>%
+  select(churn_label, tenure_months, monthly_charges) %>%
+  pivot_longer(-churn_label, names_to = "variable", values_to = "valor") %>%
+  mutate(variable = recode(variable,
+                            tenure_months = "Antigüedad (meses)",
+                            monthly_charges = "Cargo mensual (USD)")) %>%
+  ggplot(aes(x = churn_label, y = valor, fill = churn_label)) +
+  geom_boxplot(outlier.alpha = 0.25, width = 0.5) +
+  scale_fill_manual(values = c("Activo" = col_good, "Dado de baja" = col_critical)) +
+  facet_wrap(~variable, scales = "free_y") +
+  theme_dash() +
+  theme(legend.position = "none", axis.text.x = element_text(color = col_ink))
+```
+
+# Contrato y facturación
+
+## Row {height=50%}
+
+```{r}
+#| title: "Tasa de churn por tipo de contrato"
+bar_churn("contract")
+```
+
+```{r}
+#| title: "Tasa de churn por método de pago"
+bar_churn("payment_method")
+```
+
+## Row {height=50%}
+
+```{r}
+#| title: "Tasa de churn por tipo de internet"
+bar_churn("internet_service")
+```
+
+```{r}
+#| title: "Cargo mensual vs. antigüedad (cada punto es un cliente)"
+
+p <- datos %>%
+  mutate(churn_label = recode(churn_label, "No" = "Activo", "Yes" = "Dado de baja")) %>%
+  ggplot(aes(x = tenure_months, y = monthly_charges, color = churn_label,
+             text = paste0("Estado: ", churn_label,
+                            "<br>Antigüedad: ", tenure_months, " meses",
+                            "<br>Cargo mensual: ", dollar(monthly_charges)))) +
+  geom_point(alpha = 0.35, size = 1.4) +
+  scale_color_manual(values = c("Activo" = col_good, "Dado de baja" = col_critical)) +
+  labs(x = "Antigüedad (meses)", y = "Cargo mensual (USD)") +
+  theme_dash() +
+  theme(axis.title = element_text(color = col_ink2, size = 10),
+        legend.position = "right")
+
+ggplotly(p, tooltip = "text") %>%
+  plotly::config(displayModeBar = FALSE) %>%
+  layout(legend = list(title = list(text = "")))
+```
+
+# Servicios adicionales
+
+## Row {height=100%}
+
+```{r}
+#| title: "Tasa de churn por servicio de soporte / seguridad contratado"
+#| fig-width: 11
+#| fig-height: 6.5
+
+etiquetas_soporte <- c(
+  online_security   = "Seguridad online",
+  online_backup     = "Respaldo online",
+  device_protection = "Protección de dispositivo",
+  tech_support      = "Soporte técnico"
+)
+
+facet_bar_churn(names(etiquetas_soporte), etiquetas_soporte, ncol = 2)
+```
+
+# Perfil demográfico
+
+## Row {height=100%}
+
+```{r}
+#| title: "Tasa de churn por perfil demográfico"
+#| fig-width: 11
+#| fig-height: 6.5
+
+etiquetas_demo <- c(
+  senior_citizen = "Adulto mayor",
+  partner        = "Tiene pareja",
+  dependents     = "Tiene personas a cargo",
+  gender         = "Género"
+)
+
+facet_bar_churn(names(etiquetas_demo), etiquetas_demo, ncol = 2)
+```
+
+# Motivos de baja
+
+## Row {height=100%}
+
+```{r}
+#| title: "Motivos declarados por los clientes que se dieron de baja"
+#| fig-width: 11
+#| fig-height: 6.5
+
+datos %>%
+  filter(churn_label == "Yes", !is.na(churn_reason)) %>%
+  count(churn_reason, sort = TRUE) %>%
+  mutate(churn_reason = fct_reorder(churn_reason, n)) %>%
+  ggplot(aes(x = n, y = churn_reason)) +
+  geom_col(fill = col_blue, width = 0.65) +
+  geom_text(aes(label = comma(n)), hjust = -0.2, size = 3.3, color = col_ink) +
+  scale_x_continuous(expand = expansion(mult = c(0, 0.15))) +
+  theme_dash()
+```
+
+# Modelo predictivo
+
+## Row {height=22%}
+
+```{r}
+#| content: valuebox
+#| title: "AUC (set de test)"
+#| icon: bullseye
+#| color: primary
+list(value = round(as.numeric(auc(roc_glm)), 3))
+```
+
+```{r}
+#| content: valuebox
+#| title: "Umbral operativo"
+#| icon: sliders
+#| color: info
+list(value = round(umbral, 3))
+```
+
+```{r}
+#| content: valuebox
+#| title: "Sensibilidad (detecta churners)"
+#| icon: search
+#| color: danger
+list(value = unname(percent(cm_umbral$byClass["Sensitivity"], accuracy = 0.1)))
+```
+
+```{r}
+#| content: valuebox
+#| title: "Especificidad"
+#| icon: shield-check
+#| color: success
+list(value = unname(percent(cm_umbral$byClass["Specificity"], accuracy = 0.1)))
+```
+
+## Row {height=40%}
+
+```{r}
+#| title: "Curva ROC — regresión logística (set de test)"
+#| fig-width: 6
+#| fig-height: 4.5
+
+df_roc <- tibble(fpr = 1 - roc_glm$specificities, tpr = roc_glm$sensitivities)
+
+ggplot(df_roc, aes(fpr, tpr)) +
+  geom_abline(slope = 1, intercept = 0, color = col_grid, linewidth = 0.5) +
+  geom_line(color = col_blue, linewidth = 1) +
+  labs(x = "1 − especificidad", y = "Sensibilidad") +
+  theme_dash() +
+  theme(axis.title = element_text(color = col_ink2, size = 10),
+        axis.text = element_text(size = 9))
+```
+
+```{r}
+#| title: "Variables con efecto significativo sobre el riesgo de churn"
+#| fig-width: 7
+#| fig-height: 4.5
+
+coefs <- summary(modelo_glm$finalModel)$coefficients %>%
+  as.data.frame() %>%
+  rownames_to_column("variable") %>%
+  filter(variable != "(Intercept)", `Pr(>|z|)` < 0.05) %>%
+  mutate(variable = fct_reorder(variable, Estimate))
+
+ggplot(coefs, aes(Estimate, variable, fill = Estimate > 0)) +
+  geom_col(width = 0.6) +
+  geom_vline(xintercept = 0, color = col_ink2) +
+  scale_fill_manual(values = c("TRUE" = col_critical, "FALSE" = col_good), guide = "none") +
+  labs(x = "Coeficiente (rojo = sube el riesgo, verde = lo baja)", y = NULL) +
+  theme_dash() +
+  theme(axis.title = element_text(color = col_ink2, size = 10))
+```
+
+## Row {height=38%}
+
+```{r}
+#| title: "Clientes activos ordenados por riesgo de churn"
+
+datatable(
+  tabla_riesgo,
+  rownames = FALSE,
+  filter = "top",
+  options = list(
+    pageLength = 10,
+    language = list(url = "//cdn.datatables.net/plug-ins/1.13.6/i18n/es-ES.json")
+  )
+) %>%
+  formatStyle(
+    "Riesgo",
+    backgroundColor = styleEqual(c("Alto riesgo", "Bajo riesgo"), c("#f7d9d8", "#dcf2dc")),
+    fontWeight = "bold"
+  )
+```
+

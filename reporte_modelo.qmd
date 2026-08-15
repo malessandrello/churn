@@ -1,0 +1,277 @@
+---
+title: "Modelo Predictivo de Churn — Telecomunicaciones California"
+author: "Mauricio Alessandrello"
+date: today
+lang: es
+format:
+  html:
+    toc: true
+    toc-title: "Contenido"
+    number-sections: true
+    theme: flatly
+    code-fold: true
+    code-summary: "Mostrar código"
+    df-print: paged
+    embed-resources: true
+execute:
+  echo: true
+  warning: false
+  message: false
+---
+
+```{r}
+#| label: setup
+#| include: false
+
+library(tidyverse)
+library(readxl)
+library(janitor)
+library(caret)
+library(ranger)
+library(pROC)
+library(scales)
+library(knitr)
+
+set.seed(2026)
+
+datos <- read_excel("data.xlsx") %>%
+  clean_names() %>%
+  select(-count, -country, -state) %>%
+  mutate(total_charges = na_if(str_trim(total_charges), "") %>% as.numeric())
+
+model_data <- datos %>%
+  select(
+    churn_label,
+    gender, senior_citizen, partner, dependents,
+    tenure_months, phone_service, multiple_lines, internet_service,
+    online_security, online_backup, device_protection, tech_support,
+    streaming_tv, streaming_movies, contract, paperless_billing,
+    payment_method, monthly_charges
+  ) %>%
+  mutate(
+    churn_label = factor(churn_label, levels = c("No", "Yes")),
+    across(where(is.character), as.factor)
+  )
+
+idx_train  <- createDataPartition(model_data$churn_label, p = 0.75, list = FALSE)
+train_data <- model_data[idx_train, ]
+test_data  <- model_data[-idx_train, ]
+
+ctrl <- trainControl(
+  method = "cv", number = 5,
+  classProbs = TRUE, summaryFunction = twoClassSummary,
+  savePredictions = "final"
+)
+
+modelo_glm <- train(
+  churn_label ~ ., data = train_data,
+  method = "glm", family = "binomial",
+  trControl = ctrl, metric = "ROC"
+)
+
+grilla_rf <- expand.grid(mtry = c(3, 5, 8, 12), splitrule = "gini", min.node.size = c(1, 5, 10))
+
+modelo_rf <- train(
+  churn_label ~ ., data = train_data,
+  method = "ranger", trControl = ctrl, metric = "ROC",
+  tuneGrid = grilla_rf, importance = "impurity", num.threads = 1
+)
+
+prob_glm <- predict(modelo_glm, test_data, type = "prob")[, "Yes"]
+prob_rf  <- predict(modelo_rf,  test_data, type = "prob")[, "Yes"]
+
+roc_glm <- roc(test_data$churn_label, prob_glm, levels = c("No", "Yes"), direction = "<")
+roc_rf  <- roc(test_data$churn_label, prob_rf,  levels = c("No", "Yes"), direction = "<")
+
+umbral_glm <- as.numeric(coords(roc_glm, "best", best.method = "youden", ret = "threshold")$threshold)
+
+pred_glm_05  <- predict(modelo_glm, test_data)
+pred_glm_umb <- factor(ifelse(prob_glm > umbral_glm, "Yes", "No"), levels = c("No", "Yes"))
+
+cm_05  <- confusionMatrix(pred_glm_05,  test_data$churn_label, positive = "Yes")
+cm_umb <- confusionMatrix(pred_glm_umb, test_data$churn_label, positive = "Yes")
+
+col_blue     <- "#2a78d6"
+col_good     <- "#0ca30c"
+col_critical <- "#d03b3b"
+col_ink      <- "#0b0b0b"
+col_ink2     <- "#52514e"
+col_grid     <- "#e1e0d9"
+col_surface  <- "#fcfcfb"
+
+theme_rep <- function() {
+  theme_minimal(base_size = 12) +
+    theme(
+      panel.grid.minor = element_blank(),
+      panel.grid.major = element_line(color = col_grid, linewidth = 0.3),
+      axis.text  = element_text(color = col_ink2),
+      axis.title = element_text(color = col_ink2),
+      plot.background  = element_rect(fill = col_surface, color = NA),
+      panel.background = element_rect(fill = col_surface, color = NA)
+    )
+}
+```
+
+# Introducción
+
+## El problema
+
+En el reporte exploratorio anterior identificamos que el 26,5% de los clientes de esta compañía de telecomunicaciones de California abandonó el servicio, y que ese abandono se concentra en un perfil reconocible: contratos mes a mes, sin servicios de seguridad/soporte, con fibra óptica y pago por cheque electrónico. El paso natural siguiente es convertir ese diagnóstico descriptivo en una **herramienta predictiva**: un modelo que, para cada cliente activo, estime su probabilidad de abandonar, de forma que el equipo comercial pueda priorizar acciones de retención sobre quienes más lo necesitan, en lugar de aplicar esfuerzos parejos sobre toda la base.
+
+Este reporte documenta el modelo entrenado, sus métricas de desempeño, y — en particular — la decisión de **a partir de qué probabilidad se considera que un cliente está "en riesgo"**, que no es un detalle técnico menor: de esa decisión depende cuántos churners reales se detectan y cuántos recursos de retención se gastan en clientes que en realidad no se iban a ir.
+
+## Variables utilizadas
+
+Se entrenó el modelo únicamente con variables **disponibles antes de que el cliente decida irse** (predictores genuinos), excluyendo explícitamente:
+
+- `churn_score` y `cltv`: puntajes propietarios precalculados por la empresa. En el EDA se vio que `churn_score` separa casi perfectamente a los clientes que se van — es decir, ya "conoce" el resultado, y usarlo sería una fuga de información (*data leakage*), no una predicción genuina.
+- `churn_reason`: solo existe para clientes que ya se dieron de baja; usarlo sería predecir el resultado a partir de una consecuencia del resultado.
+- `total_charges`: colineal casi perfecto con `tenure_months × monthly_charges` (correlación ≈ 0,9996 en el EDA) y con datos faltantes en clientes nuevos. Se conservan `tenure_months` y `monthly_charges` por separado.
+- Identificadores y geografía de grano fino (`customer_id`, `city`, `zip_code`, latitud/longitud): no generalizan y agregan riesgo de sobreajuste.
+
+Quedaron **18 predictores**: perfil demográfico, servicios contratados, tipo de contrato, forma de pago, antigüedad y cargo mensual.
+
+# El modelo
+
+Se entrenaron y compararon dos algoritmos con validación cruzada de 5 folds sobre un 75% de los datos (partición estratificada), reservando el 25% restante como set de test:
+
+- **Regresión logística** — modelo lineal, totalmente interpretable (cada variable tiene un coeficiente con signo y magnitud claros).
+- **Random Forest** (`ranger`) — modelo de ensamble de árboles, típicamente más flexible para capturar interacciones no lineales, a costa de ser una "caja más opaca".
+
+## Comparación en validación cruzada
+
+```{r}
+#| label: tabla-cv
+
+comparacion_cv <- resamples(list(Logistica = modelo_glm, RandomForest = modelo_rf))
+resumen_roc <- summary(comparacion_cv)$statistics$ROC %>%
+  as.data.frame() %>%
+  rownames_to_column("Modelo") %>%
+  select(Modelo, Min., Mean, Max.) %>%
+  rename(`ROC mínimo` = Min., `ROC promedio` = Mean, `ROC máximo` = Max.) %>%
+  mutate(across(where(is.numeric), ~round(.x, 3)))
+
+kable(resumen_roc, align = "lccc")
+```
+
+## Desempeño en el set de test
+
+```{r}
+#| label: tabla-test
+
+tabla_test <- tibble(
+  Modelo = c("Regresión logística", "Random Forest"),
+  AUC    = c(round(as.numeric(auc(roc_glm)), 4), round(as.numeric(auc(roc_rf)), 4))
+)
+kable(tabla_test, align = "lc")
+```
+
+```{r}
+#| label: fig-roc
+#| fig-cap: "Curvas ROC de ambos modelos sobre el set de test"
+#| fig-width: 7
+#| fig-height: 5.5
+
+df_roc <- bind_rows(
+  tibble(fpr = 1 - roc_glm$specificities, tpr = roc_glm$sensitivities, modelo = "Logística"),
+  tibble(fpr = 1 - roc_rf$specificities,  tpr = roc_rf$sensitivities,  modelo = "Random Forest")
+)
+
+ggplot(df_roc, aes(fpr, tpr, color = modelo)) +
+  geom_abline(slope = 1, intercept = 0, color = col_grid, linewidth = 0.5) +
+  geom_line(linewidth = 0.9) +
+  scale_color_manual(values = c("Logística" = col_blue, "Random Forest" = col_critical)) +
+  labs(x = "1 − especificidad (falsos positivos)", y = "Sensibilidad (verdaderos positivos)",
+       color = NULL) +
+  theme_rep()
+```
+
+Los dos modelos quedan prácticamente empatados en poder discriminativo (AUC ≈ 0,86 ambos). Dado que la regresión logística **es igual de buena y además interpretable** — se puede explicar a un área de negocio exactamente qué variables aumentan o reducen la probabilidad de churn y en qué magnitud —, es el modelo elegido para producción.
+
+## Variables más relevantes
+
+```{r}
+#| label: fig-coef
+#| fig-cap: "Coeficientes con significancia estadística (p < 0.05) en la regresión logística"
+#| fig-width: 8
+#| fig-height: 4.5
+
+coefs <- summary(modelo_glm$finalModel)$coefficients %>%
+  as.data.frame() %>%
+  rownames_to_column("variable") %>%
+  filter(variable != "(Intercept)", `Pr(>|z|)` < 0.05) %>%
+  mutate(variable = fct_reorder(variable, Estimate))
+
+ggplot(coefs, aes(Estimate, variable, fill = Estimate > 0)) +
+  geom_col(width = 0.6) +
+  geom_vline(xintercept = 0, color = col_ink2) +
+  scale_fill_manual(values = c("TRUE" = col_critical, "FALSE" = col_good), guide = "none") +
+  labs(x = "Coeficiente (log-odds) — rojo aumenta el riesgo, verde lo reduce", y = NULL) +
+  theme_rep()
+```
+
+La antigüedad (`tenure_months`) y el contrato a uno o dos años son los factores que más **reducen** el riesgo de churn; tener personas a cargo también lo reduce. La facturación sin papel, el pago por cheque electrónico y tener múltiples líneas están asociados a **mayor** riesgo — consistente con lo encontrado en el análisis exploratorio.
+
+# Elección del umbral de decisión
+
+## Por qué no alcanza con 0,5
+
+Un modelo de clasificación no predice directamente "Sí" o "No": predice una **probabilidad**, y hace falta elegir a partir de qué valor esa probabilidad se traduce en una alerta de "cliente en riesgo". Por defecto, la mayoría de las herramientas usan 0,5 — pero ese valor no tiene ningún fundamento estadístico ni de negocio en este caso, es solo la convención "más probable que no". Con 0,5:
+
+```{r}
+#| label: tabla-umbral-05
+
+tabla_05 <- tibble(
+  Métrica = c("Accuracy", "Sensibilidad (detecta churners reales)", "Especificidad", "Precisión"),
+  Valor = c(cm_05$overall["Accuracy"], cm_05$byClass["Sensitivity"],
+            cm_05$byClass["Specificity"], cm_05$byClass["Pos Pred Value"])
+) %>% mutate(Valor = percent(Valor, accuracy = 0.1))
+
+kable(tabla_05, align = "lc")
+```
+
+El modelo solo detecta **57 de cada 100** clientes que realmente van a abandonar. Dado que el objetivo de negocio es justamente *anticiparse* al churn, dejar pasar al 43% de los casos reales es un costo alto: son clientes que se van sin que nadie intente retenerlos.
+
+## El umbral elegido: 0,249
+
+En lugar de 0,5, se usó el **umbral óptimo de Youden**, calculado sobre la curva ROC del modelo: el punto que maximiza `sensibilidad + especificidad − 1`, es decir, el mejor balance posible entre detectar churners reales y no generar demasiadas falsas alarmas, dado el comportamiento real de este modelo sobre este dataset.
+
+```{r}
+#| label: umbral-valor
+cat("Umbral óptimo (Youden):", round(umbral_glm, 3))
+```
+
+Este valor está muy por debajo de 0,5 porque la clase "churn" es minoritaria (26,5% de los clientes): el modelo tiende a asignar probabilidades bajas en términos absolutos incluso a los clientes que sí se van, simplemente porque son menos frecuentes en los datos de entrenamiento. Bajar el umbral corrige ese sesgo estructural.
+
+```{r}
+#| label: tabla-comparacion-umbrales
+
+comparacion <- tibble(
+  Umbral = c("0,5 (default)", paste0(round(umbral_glm, 3), " (Youden)")),
+  Accuracy = c(cm_05$overall["Accuracy"], cm_umb$overall["Accuracy"]),
+  Sensibilidad = c(cm_05$byClass["Sensitivity"], cm_umb$byClass["Sensitivity"]),
+  Especificidad = c(cm_05$byClass["Specificity"], cm_umb$byClass["Specificity"]),
+  Precisión = c(cm_05$byClass["Pos Pred Value"], cm_umb$byClass["Pos Pred Value"])
+) %>%
+  mutate(across(where(is.numeric), ~percent(.x, accuracy = 0.1)))
+
+kable(comparacion, align = "lcccc")
+```
+
+Con el umbral 0,249 el modelo pasa a detectar el **83% de los churners reales** (386 de 467 clientes que efectivamente abandonaron en el set de test), casi el doble que con 0,5. El costo es una precisión menor (53,5% vs. 69,1%): de cada 10 clientes marcados como "en riesgo", ahora 5 realmente se iban a ir en vez de 7.
+
+## Por qué esta decisión tiene sentido de negocio
+
+La razón para preferir explícitamente mayor sensibilidad a mayor precisión es asimétrica en costos:
+
+- **Un falso positivo** (marcar como "en riesgo" a alguien que en realidad iba a quedarse) cuesta, en el peor caso, una acción de retención de bajo costo dirigida a alguien que no la necesitaba (un descuento, un llamado, una oferta).
+- **Un falso negativo** (no detectar a un cliente que efectivamente se va) cuesta la pérdida completa de ese cliente y su ingreso futuro, sin que nadie haya intentado evitarlo.
+
+Cuando el costo de un falso negativo es sustancialmente mayor que el de un falso positivo — como suele ocurrir en retención de clientes —, es correcto mover el umbral por debajo de 0,5 y aceptar más falsas alarmas a cambio de perder menos clientes reales. **0,249 es el punto de equilibrio matemático (Youden) entre ambos errores**; si el costo real de una acción de retención fuera muy alto, convendría subir el umbral hacia 0,5 para ser más selectivo.
+
+# Conclusiones
+
+1. **La regresión logística es el modelo recomendado**: iguala al Random Forest en poder predictivo (AUC ≈ 0,86) pero es interpretable — se puede explicar cada predicción en términos de las variables del cliente.
+2. **El umbral de decisión (0,249) no es un detalle técnico secundario**: cambiarlo de 0,5 a 0,249 casi duplica la cantidad de churners detectados (57% → 83%), al costo de más falsas alarmas. Es una decisión de negocio, no solo estadística, y debe revisarse si cambian los costos relativos de retención vs. pérdida de clientes.
+3. **Los factores más protectores** son la antigüedad, los contratos largos y tener personas a cargo; los que más **elevan el riesgo** son la facturación sin papel, el pago por cheque electrónico y tener múltiples líneas — coherente con el perfil de riesgo ya identificado en el EDA (contrato mes a mes, fibra óptica, sin servicios adicionales, cheque electrónico).
+4. **Próximo paso**: este modelo, con el umbral 0,249, es el que se integra al dashboard operativo para mostrar, cliente por cliente, quién está en riesgo hoy.
