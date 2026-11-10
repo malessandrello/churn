@@ -1,0 +1,396 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Churn Telco California</title>
+<meta name="description" content="Exploratory analysis and predictive model of customer churn at a California telecom company. R + D3.">
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --ink: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11,11,11,0.10);
+  --s1: #2a78d6;          /* main series / active */
+  --s1-wash: rgba(42,120,214,0.10);
+  --s2: #eb6834;          /* churned */
+  --up: #e34948;          /* raises risk (diverging: red) */
+  --down: #2a78d6;        /* lowers risk (diverging: blue) */
+  --hi-bg: #fbe3e2;
+  --lo-bg: #dcebfb;
+  --shadow: 0 1px 2px rgba(11,11,11,0.04), 0 4px 16px rgba(11,11,11,0.04);
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+    --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+    --s1: #3987e5; --s1-wash: rgba(57,135,229,0.14); --s2: #d95926; --up: #e66767; --down: #3987e5;
+    --hi-bg: #4a2121; --lo-bg: #1b3352; --shadow: none;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d; --surface: #1a1a19; --ink: #f0efec; --ink-2: #c3c2b7; --muted: #898781;
+  --grid: #2c2c2a; --axis: #383835; --border: rgba(255,255,255,0.10);
+  --s1: #3987e5; --s1-wash: rgba(57,135,229,0.14); --s2: #d95926; --up: #e66767; --down: #3987e5;
+  --hi-bg: #4a2121; --lo-bg: #1b3352; --shadow: none;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 64px; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  margin: 0; background: var(--page); color: var(--ink);
+  font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--s1); }
+
+/* --- sticky nav --- */
+.nav {
+  position: sticky; top: 0; z-index: 10;
+  background: color-mix(in srgb, var(--page) 88%, transparent);
+  backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border);
+}
+.nav-inner { max-width: 1120px; margin: 0 auto; padding: 0 16px; display: flex; align-items: center; gap: 16px; height: 52px; }
+.brand { font-weight: 650; font-size: 15px; white-space: nowrap; color: var(--ink); text-decoration: none; }
+.links { display: flex; gap: 4px; overflow-x: auto; scrollbar-width: none; flex: 1; min-width: 0; }
+.links::-webkit-scrollbar { display: none; }
+.links a {
+  color: var(--ink-2); text-decoration: none; font-size: 14px; padding: 6px 10px; border-radius: 6px; white-space: nowrap;
+}
+.links a:hover { background: var(--border); }
+.links a.active { color: var(--ink); background: var(--border); font-weight: 550; }
+.theme-btn {
+  border: 1px solid var(--border); background: var(--surface); color: var(--ink-2);
+  width: 34px; height: 34px; border-radius: 8px; cursor: pointer; flex: none; display: grid; place-items: center;
+}
+.theme-btn svg { width: 16px; height: 16px; }
+
+/* --- layout --- */
+main { max-width: 1120px; margin: 0 auto; padding: 0 16px 64px; }
+.hero { padding: 72px 0 40px; }
+.eyebrow { font-size: 13px; letter-spacing: .06em; text-transform: uppercase; color: var(--muted); font-weight: 600; margin: 0 0 12px; }
+h1 { font-size: clamp(32px, 5vw, 52px); line-height: 1.1; margin: 0 0 16px; letter-spacing: -0.02em; font-weight: 700; max-width: 18ch; }
+.lede { font-size: 18px; color: var(--ink-2); max-width: 62ch; margin: 0; }
+
+.kpis { display: grid; grid-template-columns: 1.4fr 1fr 1fr 1fr; gap: 12px; margin-top: 40px; }
+.kpi { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px 20px; box-shadow: var(--shadow); }
+.kpi-label { font-size: 14px; color: var(--ink-2); margin: 0 0 6px; }
+.kpi-value { font-size: 30px; font-weight: 650; line-height: 1.15; margin: 0; letter-spacing: -0.01em; }
+.kpi.hero-kpi .kpi-value { font-size: 52px; }
+.kpi-note { font-size: 13px; color: var(--muted); margin: 6px 0 0; }
+
+section { padding: 56px 0 8px; border-top: 1px solid var(--border); margin-top: 32px; }
+section > header { max-width: 70ch; margin-bottom: 28px; }
+.sec-num { font-size: 13px; color: var(--muted); font-weight: 600; letter-spacing: .06em; text-transform: uppercase; margin: 0 0 6px; }
+h2 { font-size: clamp(24px, 3.2vw, 32px); line-height: 1.2; margin: 0 0 12px; letter-spacing: -0.01em; }
+section > header p { color: var(--ink-2); margin: 0; }
+section > header b { color: var(--ink); font-weight: 650; }
+
+.grid { display: grid; gap: 16px; align-items: start; }
+.g2 { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.g-5-7 { grid-template-columns: 5fr 7fr; }
+.span2 { grid-column: 1 / -1; }
+
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; box-shadow: var(--shadow); min-width: 0; }
+.card h3 { font-size: 16px; margin: 0 0 2px; font-weight: 600; }
+.card .sub { font-size: 14px; color: var(--ink-2); margin: 0 0 16px; }
+.chart { width: 100%; min-height: 60px; position: relative; }
+.chart svg { display: block; overflow: visible; }
+
+.card-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+
+/* reveal on scroll */
+.reveal { opacity: 0; transform: translateY(16px); transition: opacity .6s ease, transform .6s ease; }
+.reveal.in { opacity: 1; transform: none; }
+@media (prefers-reduced-motion: reduce) { .reveal { opacity: 1; transform: none; transition: none; } }
+
+/* --- marcas SVG --- */
+.gridline { stroke: var(--grid); stroke-width: 1; shape-rendering: crispEdges; }
+.baseline { stroke: var(--axis); stroke-width: 1; shape-rendering: crispEdges; }
+.tick { fill: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.axis-title { fill: var(--ink-2); font-size: 12px; }
+.lbl { fill: var(--ink-2); font-size: 13px; }
+.val { fill: var(--ink); font-size: 13px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.bar { fill: var(--s1); transition: opacity .15s; }
+.bar.s2 { fill: var(--s2); }
+.bar.up { fill: var(--up); }
+.bar.down { fill: var(--down); }
+.hit { fill: transparent; cursor: default; }
+.row:hover .bar, .row:focus .bar { opacity: .78; }
+.row:focus { outline: none; }
+.row:focus-visible .lbl { text-decoration: underline; }
+.box { fill: var(--s1-wash); stroke: var(--s1); stroke-width: 1.5; }
+.box.s2 { fill: color-mix(in srgb, var(--s2) 14%, transparent); stroke: var(--s2); }
+.whisker { stroke: var(--ink-2); stroke-width: 1; }
+.median { stroke: var(--ink); stroke-width: 2; }
+.dot-a { fill: var(--s1); }
+.dot-b { fill: var(--s2); }
+.roc-line { fill: none; stroke: var(--s1); stroke-width: 2; stroke-linejoin: round; stroke-linecap: round; }
+.roc-area { fill: var(--s1-wash); }
+.diag { stroke: var(--axis); stroke-width: 1; }
+.marker { fill: var(--s2); stroke: var(--surface); stroke-width: 2; }
+.hover-ring { fill: none; stroke: var(--ink); stroke-width: 2; pointer-events: none; }
+.crosshair { stroke: var(--ink-2); stroke-width: 1; pointer-events: none; }
+.zero { stroke: var(--ink-2); stroke-width: 1; }
+
+/* legend and controls */
+.legend { display: flex; gap: 16px; flex-wrap: wrap; font-size: 13px; color: var(--ink-2); margin: 0 0 12px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.sw { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+.sw.dot { border-radius: 50%; }
+.seg { display: inline-flex; border: 1px solid var(--border); border-radius: 8px; overflow: hidden; }
+.seg button {
+  font: inherit; font-size: 13px; padding: 5px 12px; border: 0; background: transparent; color: var(--ink-2); cursor: pointer;
+}
+.seg button + button { border-left: 1px solid var(--border); }
+.seg button[aria-pressed="true"] { background: var(--border); color: var(--ink); font-weight: 600; }
+
+/* tooltip */
+#tip {
+  position: fixed; z-index: 50; pointer-events: none; opacity: 0; transition: opacity .12s;
+  background: var(--surface); color: var(--ink); border: 1px solid var(--border); border-radius: 8px;
+  padding: 8px 12px; font-size: 13px; box-shadow: 0 4px 20px rgba(0,0,0,.12); max-width: 260px;
+}
+#tip .t-val { font-weight: 650; font-size: 15px; font-variant-numeric: tabular-nums; }
+#tip .t-lbl { color: var(--ink-2); }
+#tip .t-row { display: flex; align-items: center; gap: 8px; }
+#tip .key { width: 12px; height: 2px; border-radius: 1px; flex: none; }
+
+/* confusion matrix */
+.cm { display: grid; grid-template-columns: auto 1fr 1fr; gap: 6px; font-size: 14px; }
+.cm .h { color: var(--ink-2); font-size: 13px; display: flex; align-items: center; justify-content: center; text-align: center; padding: 4px; }
+.cm .h.row-h { justify-content: flex-end; }
+.cm .cell { border-radius: 8px; padding: 14px 10px; text-align: center; background: var(--page); border: 1px solid var(--border); }
+.cm .cell.ok { background: var(--lo-bg); }
+.cm .cell b { display: block; font-size: 24px; font-variant-numeric: tabular-nums; }
+.cm .cell small { color: var(--ink-2); font-size: 12px; }
+
+.mini-kpis { display: grid; grid-template-columns: repeat(4, minmax(0,1fr)); gap: 12px; margin-bottom: 16px; }
+.mini-kpis .kpi-value { font-size: 26px; }
+
+/* table */
+.tbl-tools { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; margin-bottom: 12px; }
+.tbl-tools input {
+  font: inherit; font-size: 14px; padding: 7px 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--page); color: var(--ink); min-width: 0; flex: 1 1 200px; max-width: 280px;
+}
+.tbl-wrap { overflow-x: auto; }
+table { border-collapse: collapse; width: 100%; font-size: 14px; }
+th { text-align: left; font-weight: 600; color: var(--ink-2); font-size: 13px; padding: 8px 10px; border-bottom: 1px solid var(--axis); white-space: nowrap; }
+td { padding: 9px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+.prob { display: inline-flex; align-items: center; gap: 8px; justify-content: flex-end; }
+.prob i { display: inline-block; width: 60px; height: 6px; border-radius: 3px; background: var(--grid); position: relative; overflow: hidden; }
+.prob i::after { content: ""; position: absolute; inset: 0 auto 0 0; width: var(--w); background: var(--s1); border-radius: 3px; }
+.tag { font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 99px; display: inline-flex; align-items: center; gap: 4px; }
+.tag.hi { background: var(--hi-bg); }
+.tag.lo { background: var(--lo-bg); }
+.pager { display: flex; justify-content: space-between; align-items: center; margin-top: 12px; font-size: 13px; color: var(--ink-2); gap: 12px; flex-wrap: wrap; }
+.pager button {
+  font: inherit; font-size: 13px; padding: 5px 12px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); color: var(--ink); cursor: pointer;
+}
+.pager button:disabled { opacity: .4; cursor: default; }
+
+.method { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 16px; }
+.method h3 { font-size: 15px; margin: 0 0 6px; }
+.method p { font-size: 14px; color: var(--ink-2); margin: 0; }
+
+footer { max-width: 1120px; margin: 0 auto; padding: 32px 16px 48px; color: var(--muted); font-size: 14px; border-top: 1px solid var(--border); display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+
+@media (max-width: 860px) {
+  .kpis { grid-template-columns: 1fr 1fr; }
+  .kpi.hero-kpi { grid-column: 1 / -1; }
+  .g2, .g-5-7, .method { grid-template-columns: 1fr; }
+  .mini-kpis { grid-template-columns: 1fr 1fr; }
+  .brand { display: none; }
+}
+@media (max-width: 480px) {
+  .hero { padding-top: 40px; }
+  .card { padding: 16px; }
+  .kpi-value { font-size: 24px; }
+  .kpi.hero-kpi .kpi-value { font-size: 44px; }
+}
+</style>
+</head>
+<body>
+
+<nav class="nav" aria-label="Sections">
+  <div class="nav-inner">
+    <a class="brand" href="#top">Churn · Telco</a>
+    <div class="links">
+      <a href="#overview">Overview</a>
+      <a href="#contract">Contract</a>
+      <a href="#services">Services</a>
+      <a href="#profile">Profile</a>
+      <a href="#reasons">Reasons</a>
+      <a href="#model">Model</a>
+      <a href="#risk">At-risk customers</a>
+    </div>
+    <button class="theme-btn" id="themeBtn" aria-label="Toggle light/dark theme">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"/></svg>
+    </button>
+  </div>
+</nav>
+
+<main id="top">
+  <div class="hero">
+    <p class="eyebrow">Data analysis project · R + D3</p>
+    <h1>Why do telco customers leave?</h1>
+    <p class="lede">Exploratory analysis and a predictive model of customer churn across
+      <b data-f="clientes"></b> customers of a California telecom company.
+      The goal: understand which profiles cancel the service and flag who is at risk before they go.</p>
+
+    <div class="kpis">
+      <div class="kpi hero-kpi"><p class="kpi-label">Churn rate</p><p class="kpi-value" data-f="tasa"></p><p class="kpi-note"><span data-f="bajas"></span> customers churned</p></div>
+      <div class="kpi"><p class="kpi-label">Total customers</p><p class="kpi-value" data-f="clientes"></p></div>
+      <div class="kpi"><p class="kpi-label">Average tenure</p><p class="kpi-value" data-f="antig"></p></div>
+      <div class="kpi"><p class="kpi-label">Average CLTV</p><p class="kpi-value" data-f="cltv"></p><p class="kpi-note">Customer lifetime value</p></div>
+    </div>
+  </div>
+
+  <section id="overview">
+    <header>
+      <p class="sec-num">01 · Overview</p>
+      <h2>One in four customers churned</h2>
+      <p>Churners are mostly new customers: their median tenure is <b data-f="med_t_b"></b>, versus
+        <b data-f="med_t_a"></b> for active customers. They also pay more per month
+        (median <b data-f="med_m_b"></b> vs. <b data-f="med_m_a"></b>).</p>
+    </header>
+    <div class="grid g-5-7">
+      <div class="card reveal"><h3>Customers by status</h3><p class="sub">Count and share of total</p><div class="chart" id="c-estado"></div></div>
+      <div class="card reveal"><h3>Tenure and monthly charges by status</h3><p class="sub">Box = middle 50% · line = median · whiskers = 1.5 × IQR</p>
+        <div class="legend"><span><i class="sw" style="background:var(--s1)"></i>Active</span><span><i class="sw" style="background:var(--s2)"></i>Churned</span></div>
+        <div class="chart" id="c-box"></div></div>
+    </div>
+  </section>
+
+  <section id="contract">
+    <header>
+      <p class="sec-num">02 · Contract and billing</p>
+      <h2>Month-to-month contracts are the strongest signal</h2>
+      <p><b data-f="mm"></b> of month-to-month customers churned; on two-year contracts, only <b data-f="dos"></b>.
+        Electronic check payments (<b data-f="cheque"></b>) and fiber optic internet (<b data-f="fibra"></b>) also concentrate churn.</p>
+    </header>
+    <div class="grid g2">
+      <div class="card reveal"><h3>Churn rate by contract type</h3><p class="sub">% of customers who churned</p><div class="chart" id="c-contract"></div></div>
+      <div class="card reveal"><h3>Churn rate by payment method</h3><p class="sub">% of customers who churned</p><div class="chart" id="c-payment"></div></div>
+      <div class="card reveal"><h3>Churn rate by internet service</h3><p class="sub">% of customers who churned</p><div class="chart" id="c-internet"></div></div>
+      <div class="card reveal">
+        <div class="card-head">
+          <div><h3>Monthly charges vs. tenure</h3><p class="sub">Each dot is a customer</p></div>
+          <div class="seg" role="group" aria-label="Filter customers" id="scatterSeg">
+            <button aria-pressed="true" data-v="all">All</button><button aria-pressed="false" data-v="0">Active</button><button aria-pressed="false" data-v="1">Churned</button>
+          </div>
+        </div>
+        <div class="legend"><span><i class="sw dot" style="background:var(--s1)"></i>Active</span><span><i class="sw dot" style="background:var(--s2)"></i>Churned</span></div>
+        <div class="chart" id="c-scatter"></div>
+      </div>
+    </div>
+  </section>
+
+  <section id="services">
+    <header>
+      <p class="sec-num">03 · Add-on services</p>
+      <h2>No support or security add-ons, more churn</h2>
+      <p>Among internet customers without tech support, churn reaches <b data-f="sop_no"></b>;
+        with support it drops to <b data-f="sop_si"></b>. Customers without internet barely churn at all (<b data-f="sin_int"></b>).</p>
+    </header>
+    <div class="card reveal"><h3>Churn rate by add-on service</h3><p class="sub">Same scale across all four panels for easy comparison</p><div class="chart" id="c-servicios"></div></div>
+  </section>
+
+  <section id="profile">
+    <header>
+      <p class="sec-num">04 · Demographics</p>
+      <h2>Seniors and customers without family ties churn more</h2>
+      <p>Senior citizens churn at <b data-f="senior"></b>, customers without a partner at
+        <b data-f="sin_pareja"></b>, and those without dependents at <b data-f="sin_dep"></b>. Gender, on the other hand, makes no difference.</p>
+    </header>
+    <div class="card reveal"><h3>Churn rate by demographic profile</h3><p class="sub">Same scale across all four panels for easy comparison</p><div class="chart" id="c-demo"></div></div>
+  </section>
+
+  <section id="reasons">
+    <header>
+      <p class="sec-num">05 · Churn reasons</p>
+      <h2>Competitors and customer service lead the list</h2>
+      <p>Competitor-related reasons combined (better offers, speed, data, devices) account for
+        <b data-f="comp"></b> of churn. The attitude of support staff is the single most cited reason.</p>
+    </header>
+    <div class="card reveal"><h3>Reasons given by churned customers</h3><p class="sub">Number of customers · <span data-f="bajas"></span> churned in total</p><div class="chart" id="c-motivos"></div></div>
+  </section>
+
+  <section id="model">
+    <header>
+      <p class="sec-num">06 · Predictive model</p>
+      <h2>A logistic regression catches 8 out of 10 churners</h2>
+      <p>Trained on 75% of the data and evaluated on <b data-f="n_test"></b> customers the model never saw.
+        It uses a threshold of <b data-f="umbral"></b> (Youden's index) instead of 0.5, to prioritize catching customers who leave.</p>
+    </header>
+    <div class="mini-kpis">
+      <div class="kpi reveal"><p class="kpi-label">AUC</p><p class="kpi-value" data-f="auc"></p><p class="kpi-note">Area under the ROC curve</p></div>
+      <div class="kpi reveal"><p class="kpi-label">Sensitivity</p><p class="kpi-value" data-f="sens"></p><p class="kpi-note">Churners detected</p></div>
+      <div class="kpi reveal"><p class="kpi-label">Specificity</p><p class="kpi-value" data-f="spec"></p><p class="kpi-note">Active customers correctly classified</p></div>
+      <div class="kpi reveal"><p class="kpi-label">Precision</p><p class="kpi-value" data-f="prec"></p><p class="kpi-note">Alerts that are real churners</p></div>
+    </div>
+    <div class="grid g2">
+      <div class="card reveal"><h3>ROC curve (test set)</h3><p class="sub">Orange dot = chosen operating threshold</p><div class="chart" id="c-roc"></div></div>
+      <div class="card reveal"><h3>Variables with a significant effect</h3><p class="sub">Coefficients (log-odds), p &lt; 0.05</p>
+        <div class="legend"><span><i class="sw" style="background:var(--up)"></i>Raises risk</span><span><i class="sw" style="background:var(--down)"></i>Lowers risk</span></div>
+        <div class="chart" id="c-coef"></div></div>
+      <div class="card reveal span2"><h3>Confusion matrix (test set)</h3><p class="sub">Model prediction vs. what actually happened</p><div id="c-cm"></div></div>
+    </div>
+  </section>
+
+  <section id="risk">
+    <header>
+      <p class="sec-num">07 · Putting it to use</p>
+      <h2>Active customers ranked by risk</h2>
+      <p>The model assigns each active customer a churn probability. <b data-f="n_alto"></b> are above the threshold and would be
+        candidates for a retention campaign.</p>
+    </header>
+    <div class="card reveal">
+      <div class="tbl-tools">
+        <input type="search" id="q" placeholder="Search by customer ID" aria-label="Search by customer ID">
+        <div class="seg" role="group" aria-label="Filter by risk" id="riskSeg">
+          <button aria-pressed="true" data-v="all">All</button><button aria-pressed="false" data-v="hi">High risk</button><button aria-pressed="false" data-v="lo">Low risk</button>
+        </div>
+      </div>
+      <div class="tbl-wrap"><table>
+        <thead><tr><th>Customer ID</th><th>Contract</th><th>Internet</th><th>Payment method</th><th class="num">Tenure</th><th class="num">Monthly charges</th><th class="num">Churn prob.</th><th>Risk</th></tr></thead>
+        <tbody id="tbody"></tbody>
+      </table></div>
+      <div class="pager"><span id="pinfo"></span><span><button id="prev">Previous</button> <button id="next">Next</button></span></div>
+    </div>
+  </section>
+
+  <section id="method">
+    <header><p class="sec-num">Methodology</p><h2>How it was built</h2></header>
+    <div class="method">
+      <div><h3>Data and cleaning</h3><p>A dataset of 7,043 customers and 33 variables. Constant columns (country, state) were dropped, and blank total charges for brand-new customers were handled.</p></div>
+      <div><h3>No data leakage</h3><p>The churn score, CLTV and churn reason (which only exists for customers who already left) were excluded from the model, along with identifiers and fine-grained geography.</p></div>
+      <div><h3>Modeling</h3><p>Stratified 75/25 split and 5-fold cross-validation with <code>caret</code>. It was benchmarked against a Random Forest; logistic regression was chosen for interpretability, with similar performance.</p></div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <span>Mauricio Alessandrello · Analysis in R (tidyverse, caret, pROC) · Visualization with D3.js</span>
+  <a href="https://github.com/malessandrello/churn">Code on GitHub</a>
+</footer>
+
+<div id="tip" role="tooltip"></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.9.0/d3.min.js"></script>
+<script src="data.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
